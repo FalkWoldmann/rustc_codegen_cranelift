@@ -54,27 +54,16 @@ fn predefine_mono_items<'tcx>(
 struct MeasuremeProfiler(SelfProfilerRef);
 
 struct TimingGuard {
-    profiler: std::mem::ManuallyDrop<SelfProfilerRef>,
+    // `inner` borrows from `profiler`, so it must be declared (and thus dropped) first.
     inner: Option<rustc_data_structures::profiling::TimingGuard<'static>>,
-}
-
-impl Drop for TimingGuard {
-    fn drop(&mut self) {
-        self.inner.take();
-        unsafe {
-            std::mem::ManuallyDrop::drop(&mut self.profiler);
-        }
-    }
+    profiler: SelfProfilerRef,
 }
 
 impl cranelift_codegen::timing::Profiler for MeasuremeProfiler {
     fn start_pass(&self, pass: cranelift_codegen::timing::Pass) -> Box<dyn std::any::Any> {
-        let mut timing_guard = Box::new(TimingGuard {
-            profiler: std::mem::ManuallyDrop::new(self.0.clone()),
-            inner: None,
-        });
+        let mut timing_guard = Box::new(TimingGuard { inner: None, profiler: self.0.clone() });
         timing_guard.inner = Some(
-            unsafe { &*(&*timing_guard.profiler as &SelfProfilerRef as *const SelfProfilerRef) }
+            unsafe { &*(&timing_guard.profiler as *const SelfProfilerRef) }
                 .generic_activity(pass.description()),
         );
         timing_guard
