@@ -8,7 +8,7 @@ use rustc_ast::ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_attr_ir::lang_items::LangItem;
 use rustc_middle::mir::interpret::{GlobalAlloc, PointerArithmetic, Scalar as ConstScalar};
 use rustc_middle::ty::layout::FnAbiOf;
-use rustc_span::sym;
+use rustc_span::{Symbol, sym};
 use rustc_target::asm::*;
 use rustc_target::spec::Arch;
 use target_lexicon::BinaryFormat;
@@ -588,10 +588,9 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
 
         if self.arch == InlineAsmArch::AArch64 {
             for feature in &self.tcx.codegen_fn_attrs(self.enclosing_def_id).target_features {
-                if feature.name == sym::neon {
-                    continue;
+                if let Some(ext) = aarch64_arch_extension_name(&feature.name) {
+                    writeln!(generated_asm, ".arch_extension {ext}").unwrap();
                 }
-                writeln!(generated_asm, ".arch_extension {}", feature.name).unwrap();
             }
         }
 
@@ -655,10 +654,9 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
 
         if self.arch == InlineAsmArch::AArch64 {
             for feature in &self.tcx.codegen_fn_attrs(self.enclosing_def_id).target_features {
-                if feature.name == sym::neon {
-                    continue;
+                if let Some(ext) = aarch64_arch_extension_name(&feature.name) {
+                    writeln!(generated_asm, ".arch_extension no{ext}").unwrap();
                 }
-                writeln!(generated_asm, ".arch_extension no{}", feature.name).unwrap();
             }
         }
 
@@ -930,6 +928,30 @@ fn call_inline_asm<'tcx>(
         );
         place.write_cvalue(fx, CValue::by_val(value, place.layout()));
     }
+}
+
+/// Maps a Rust AArch64 target feature to the name the assembler accepts for `.arch_extension`.
+///
+/// Returns `None` for features that LLVM's assembler has no `.arch_extension` for (as of LLVM 23),
+/// as it rejects unknown extensions with a hard error.
+fn aarch64_arch_extension_name(feature: &Symbol) -> Option<&str> {
+    if *feature == sym::neon {
+        return None;
+    }
+    Some(match feature.as_str() {
+        "dpb" => "ccpp",
+        "dpb2" => "ccdp",
+        "fhm" => "fp16fml",
+        "paca" | "pacg" => "pauth",
+        "rand" => "rng",
+
+        "ecv" | "flagm2" | "frintts" | "jsconv" | "lse2" | "pmuv3" | "rcpc2" | "spe" | "vh" => {
+            return None;
+        }
+        name if name.starts_with('v') && name.ends_with('a') => return None, // v8.1a, v9a, ...
+
+        name => name,
+    })
 }
 
 fn asm_clif_type<'tcx>(fx: &FunctionCx<'_, '_, 'tcx>, ty: Ty<'tcx>) -> Option<types::Type> {
