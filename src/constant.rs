@@ -9,6 +9,7 @@ use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::interpret::{
     AllocId, GlobalAlloc, PointerArithmetic, Scalar, read_target_uint,
 };
+use rustc_middle::ty::layout::HasTypingEnv as _;
 use rustc_middle::ty::{ExistentialTraitRef, ScalarInt};
 
 use crate::prelude::*;
@@ -81,7 +82,7 @@ pub(crate) fn eval_mir_constant<'tcx>(
     let cv = fx.monomorphize(constant.const_);
     // This cannot fail because we checked all required_consts in advance.
     let val = cv
-        .eval(fx.tcx, ty::TypingEnv::fully_monomorphized(), constant.span)
+        .eval(fx.tcx, fx.typing_env(), constant.span)
         .expect("erroneous constant missed by mono item collection");
     (val, cv.ty())
 }
@@ -281,6 +282,7 @@ fn data_id_for_static(
     let instance = Instance::mono(tcx, def_id);
     let symbol_name = tcx.symbol_name(instance).name;
 
+    let is_thread_local = attrs.flags.contains(CodegenFnAttrFlags::THREAD_LOCAL);
     if let Some(import_linkage) = attrs.import_linkage {
         assert!(!definition);
         assert!(!tcx.is_mutable_static(def_id));
@@ -305,9 +307,13 @@ fn data_id_for_static(
             symbol_name,
             linkage,
             false,
-            attrs.flags.contains(CodegenFnAttrFlags::THREAD_LOCAL),
+            is_thread_local,
         ) {
             Ok(data_id) => data_id,
+            Err(ModuleError::IncompatibleDataTls(..)) => tcx.dcx().span_fatal(
+                tcx.def_span(def_id),
+                format!("conflicting thread-local and non-thread-local declarations for `{symbol_name}`"),
+            ),
             Err(ModuleError::IncompatibleDeclaration(_)) => tcx.dcx().fatal(format!(
                 "attempt to declare `{symbol_name}` as static, but it was already declared as function"
             )),
@@ -352,13 +358,14 @@ fn data_id_for_static(
         Linkage::Import
     };
 
-    match module.declare_data(
-        symbol_name,
-        linkage,
-        definition_writable,
-        attrs.flags.contains(CodegenFnAttrFlags::THREAD_LOCAL),
-    ) {
+    match module.declare_data(symbol_name, linkage, definition_writable, is_thread_local) {
         Ok(data_id) => data_id,
+        Err(ModuleError::IncompatibleDataTls(..)) => tcx.dcx().span_fatal(
+            tcx.def_span(def_id),
+            format!(
+                "conflicting thread-local and non-thread-local declarations for `{symbol_name}`"
+            ),
+        ),
         Err(ModuleError::IncompatibleDeclaration(_)) => tcx.dcx().fatal(format!(
             "attempt to declare `{symbol_name}` as static, but it was already declared as function"
         )),

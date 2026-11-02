@@ -7,8 +7,8 @@ use rustc_abi::CanonAbi;
 use rustc_ast::ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_attr_ir::lang_items::LangItem;
 use rustc_middle::mir::interpret::{GlobalAlloc, PointerArithmetic, Scalar as ConstScalar};
-use rustc_middle::ty::layout::FnAbiOf;
-use rustc_span::{Symbol, sym};
+use rustc_middle::ty::layout::{FnAbiOf, HasTypingEnv as _};
+use rustc_span::sym;
 use rustc_target::asm::*;
 use rustc_target::spec::Arch;
 use target_lexicon::BinaryFormat;
@@ -75,24 +75,47 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
         return;
     }
 
+    // If any input operand is `!`, then  we don't need to generate the asm terminator,
+    // but we still need to evaluate the operands.
+    // We do this in codegen instead of MIR building so that it doesn't affect borrowck.
+    // Fixes an ICE with `!` inline asm inputs (#154904).
+    let mut any_input_uninhabited = false;
+
+    // Using filter_map instead of short-circuiting on a `!` input so we don't skip evaluating
+    // anything important from later operands (e.g. the `cfg!(not(feature = "inline_asm_sym"))` check).
+    // The `rustc_codegen_ssa` version of this code does the `load_scalar` equivalent in a later loop,
+    // so it doesn't need this.
     let operands = operands
         .iter()
-        .map(|operand| match *operand {
-            InlineAsmOperand::In { reg, ref value } => CInlineAsmOperand::In {
-                reg,
-                value: crate::base::codegen_operand(fx, value).load_scalar(fx),
-            },
-            InlineAsmOperand::Out { reg, late, ref place } => CInlineAsmOperand::Out {
+        .filter_map(|operand| match *operand {
+            InlineAsmOperand::In { reg, ref value } => {
+                let value = crate::base::codegen_operand(fx, value);
+                if value.layout().uninhabited {
+                    any_input_uninhabited = true;
+                    None
+                } else {
+                    let value = value.load_scalar(fx);
+                    Some(CInlineAsmOperand::In { reg, value })
+                }
+            }
+            InlineAsmOperand::Out { reg, late, ref place } => Some(CInlineAsmOperand::Out {
                 reg,
                 late,
                 place: place.map(|place| crate::base::codegen_place(fx, place)),
-            },
+            }),
             InlineAsmOperand::InOut { reg, late, ref in_value, ref out_place } => {
-                CInlineAsmOperand::InOut {
-                    reg,
-                    _late: late,
-                    in_value: crate::base::codegen_operand(fx, in_value).load_scalar(fx),
-                    out_place: out_place.map(|place| crate::base::codegen_place(fx, place)),
+                let in_value = crate::base::codegen_operand(fx, in_value);
+                if in_value.layout().uninhabited {
+                    any_input_uninhabited = true;
+                    None
+                } else {
+                    let in_value = in_value.load_scalar(fx);
+                    Some(CInlineAsmOperand::InOut {
+                        reg,
+                        _late: late,
+                        in_value,
+                        out_place: out_place.map(|place| crate::base::codegen_place(fx, place)),
+                    })
                 }
             }
             InlineAsmOperand::Const { ref value } => {
@@ -113,7 +136,7 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
                             int,
                             fx.layout_of(ty),
                         );
-                        CInlineAsmOperand::Const { value }
+                        Some(CInlineAsmOperand::Const { value })
                     }
                     ConstScalar::Ptr(ptr, _) => {
                         if cfg!(not(feature = "inline_asm_sym")) {
@@ -160,7 +183,7 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
                             write!(symbol, "{offset:+}").unwrap();
                         }
 
-                        CInlineAsmOperand::Symbol { symbol }
+                        Some(CInlineAsmOperand::Symbol { symbol })
                     }
                 }
             }
@@ -175,7 +198,7 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
                 if let ty::FnDef(def_id, args) = *const_.ty().kind() {
                     let instance = ty::Instance::resolve_for_fn_ptr(
                         fx.tcx,
-                        ty::TypingEnv::fully_monomorphized(),
+                        fx.typing_env(),
                         def_id,
                         args.no_bound_vars().unwrap(),
                     )
@@ -188,7 +211,7 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
                         == CanonAbi::Custom
                     {
                         // We can't create a wrapper for custom ABI functions.
-                        CInlineAsmOperand::Symbol { symbol: symbol.name.to_owned() }
+                        Some(CInlineAsmOperand::Symbol { symbol: symbol.name.to_owned() })
                     } else {
                         // Pass a wrapper rather than the function itself as the function itself may not
                         // be exported from the main codegen unit and may thus be unreachable from the
@@ -204,7 +227,7 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
                             get_function_sig(fx.tcx, fx.target_config.default_call_conv, instance);
                         create_wrapper_function(fx.module, sig, &wrapper_name, symbol.name);
 
-                        CInlineAsmOperand::Symbol { symbol: wrapper_name }
+                        Some(CInlineAsmOperand::Symbol { symbol: wrapper_name })
                     }
                 } else {
                     span_bug!(span, "invalid type for asm sym (fn)");
@@ -213,7 +236,9 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
             InlineAsmOperand::SymStatic { def_id } => {
                 assert!(fx.tcx.is_static(def_id));
                 let instance = Instance::mono(fx.tcx, def_id);
-                CInlineAsmOperand::Symbol { symbol: fx.tcx.symbol_name(instance).name.to_owned() }
+                Some(CInlineAsmOperand::Symbol {
+                    symbol: fx.tcx.symbol_name(instance).name.to_owned(),
+                })
             }
             InlineAsmOperand::Label { .. } => {
                 span_bug!(span, "asm! label operands are not yet supported");
@@ -221,15 +246,19 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
         })
         .collect::<Vec<_>>();
 
-    codegen_inline_asm_inner(fx, template, &operands, options);
+    if any_input_uninhabited {
+        fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
+    } else {
+        codegen_inline_asm_inner(fx, template, &operands, options);
 
-    match destination {
-        Some(destination) => {
-            let destination_block = fx.get_block(destination);
-            fx.bcx.ins().jump(destination_block, &[]);
-        }
-        None => {
-            fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
+        match destination {
+            Some(destination) => {
+                let destination_block = fx.get_block(destination);
+                fx.bcx.ins().jump(destination_block, &[]);
+            }
+            None => {
+                fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
+            }
         }
     }
 }
@@ -588,8 +617,8 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
 
         if self.arch == InlineAsmArch::AArch64 {
             for feature in &self.tcx.codegen_fn_attrs(self.enclosing_def_id).target_features {
-                if let Some(ext) = aarch64_arch_extension_name(&feature.name) {
-                    writeln!(generated_asm, ".arch_extension {ext}").unwrap();
+                if let Some(extension) = aarch64_arch_extension(feature.name.as_str()) {
+                    writeln!(generated_asm, ".arch_extension {extension}").unwrap();
                 }
             }
         }
@@ -654,8 +683,8 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
 
         if self.arch == InlineAsmArch::AArch64 {
             for feature in &self.tcx.codegen_fn_attrs(self.enclosing_def_id).target_features {
-                if let Some(ext) = aarch64_arch_extension_name(&feature.name) {
-                    writeln!(generated_asm, ".arch_extension no{ext}").unwrap();
+                if let Some(extension) = aarch64_arch_extension(feature.name.as_str()) {
+                    writeln!(generated_asm, ".arch_extension no{extension}").unwrap();
                 }
             }
         }
@@ -930,30 +959,6 @@ fn call_inline_asm<'tcx>(
     }
 }
 
-/// Maps a Rust AArch64 target feature to the name the assembler accepts for `.arch_extension`.
-///
-/// Returns `None` for features that LLVM's assembler has no `.arch_extension` for (as of LLVM 23),
-/// as it rejects unknown extensions with a hard error.
-fn aarch64_arch_extension_name(feature: &Symbol) -> Option<&str> {
-    if *feature == sym::neon {
-        return None;
-    }
-    Some(match feature.as_str() {
-        "dpb" => "ccpp",
-        "dpb2" => "ccdp",
-        "fhm" => "fp16fml",
-        "paca" | "pacg" => "pauth",
-        "rand" => "rng",
-
-        "ecv" | "flagm2" | "frintts" | "jsconv" | "lse2" | "pmuv3" | "rcpc2" | "spe" | "vh" => {
-            return None;
-        }
-        name if name.starts_with('v') && name.ends_with('a') => return None, // v8.1a, v9a, ...
-
-        name => name,
-    })
-}
-
 fn asm_clif_type<'tcx>(fx: &FunctionCx<'_, '_, 'tcx>, ty: Ty<'tcx>) -> Option<types::Type> {
     match ty.kind() {
         // Adapted from https://github.com/rust-lang/rust/blob/df44a57fd29fca899ce473f85ed64efd0708dd7c/compiler/rustc_hir_typeck/src/inline_asm.rs#L180-L183
@@ -962,5 +967,21 @@ fn asm_clif_type<'tcx>(fx: &FunctionCx<'_, '_, 'tcx>, ty: Ty<'tcx>) -> Option<ty
             fx.clif_type(ty)
         }
         _ => fx.clif_type(ty),
+    }
+}
+
+fn aarch64_arch_extension(target_feature: &str) -> Option<&str> {
+    match target_feature {
+        "dpb" => Some("ccpp"),
+        "dpb2" => Some("ccdp"),
+        "fhm" => Some("fp16fml"),
+        "jsconv" => Some("jscvt"),
+        "paca" | "pacg" => Some("pauth"),
+        "rand" => Some("rng"),
+        "spe" => Some("profile"),
+        "ecv" | "flagm2" | "frintts" | "lse2" | "neon" | "outline-atomics" | "pmuv3" | "rcpc2"
+        | "vh" => None,
+        version if version.starts_with("v8.") || version.starts_with("v9") => None,
+        _ => Some(target_feature),
     }
 }

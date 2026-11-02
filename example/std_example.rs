@@ -112,11 +112,6 @@ fn main() {
 
     test_checked_mul();
 
-    #[cfg(all(target_arch = "aarch64", target_vendor = "apple", not(jit)))]
-    unsafe {
-        test_asm_jsconv();
-    }
-
     let _a = 1u32 << 2u8;
 
     let empty: [i32; 0] = [];
@@ -127,6 +122,14 @@ fn main() {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         test_simd();
+    }
+
+    #[cfg(all(target_arch = "aarch64", not(jit)))]
+    unsafe {
+        test_asm_target_feature_names();
+        if std::arch::is_aarch64_feature_detected!("jsconv") {
+            test_fjcvtzs();
+        }
     }
 
     Box::pin(
@@ -220,6 +223,24 @@ struct I64X2([i64; 2]);
 #[cfg_attr(target_arch = "s390x", allow(dead_code))]
 #[allow(improper_ctypes_definitions)]
 extern "C" fn foo(_a: I64X2) {}
+
+#[cfg(all(target_arch = "aarch64", not(jit)))]
+#[target_feature(enable = "dpb2,fhm,frintts,jsconv,paca,pacg,pmuv3,rand,rcpc2,spe,vh")]
+unsafe fn test_asm_target_feature_names() {
+    unsafe {
+        std::arch::asm!("nop");
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", not(jit)))]
+#[target_feature(enable = "jsconv")]
+unsafe fn test_fjcvtzs() {
+    unsafe {
+        let output: i32;
+        std::arch::asm!("fjcvtzs {:w}, {:d}", out(reg) output, in(vreg) 3.5f64);
+        assert_eq!(output, 3);
+    }
+}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
@@ -730,18 +751,6 @@ unsafe fn test_zmm_roundtrip() {
 
         assert_eq!(input, output);
     }
-}
-
-// `jsconv` has no `.arch_extension` name, so it must not be emitted as one. `fjcvtzs` still
-// assembles as aarch64-apple-darwin enables `jsconv` by default.
-#[cfg(all(target_arch = "aarch64", target_vendor = "apple", not(jit)))]
-#[target_feature(enable = "jsconv")]
-unsafe fn test_asm_jsconv() {
-    let ret: i32;
-    unsafe {
-        std::arch::asm!("fjcvtzs {dst:w}, {src:d}", src = in(vreg) black_box(-1.5f64), dst = out(reg) ret);
-    }
-    assert_eq!(ret, -1);
 }
 
 fn test_checked_mul() {
