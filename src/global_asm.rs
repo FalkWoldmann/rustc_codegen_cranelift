@@ -1,6 +1,7 @@
 //! The AOT driver uses [`cranelift_object`] to write object files suitable for linking into a
 //! standalone executable.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -212,6 +213,7 @@ impl GlobalAsmConfig {
 pub(crate) fn compile_global_asm(
     config: &GlobalAsmConfig,
     global_asm: String,
+    target_features: &BTreeSet<String>,
     global_asm_object_file: &Path,
 ) -> Result<(), String> {
     assert!(!global_asm.is_empty());
@@ -258,6 +260,7 @@ pub(crate) fn compile_global_asm(
             // JSON targets currently require `-Zunstable-options`
             // Tracking issue: https://github.com/rust-lang/rust/issues/151528
             .arg("-Zunstable-options")
+            .args(target_features.iter().map(|feature| format!("-Ctarget-feature=+{feature}")))
             .stdin(Stdio::piped())
             .spawn()
             .expect("Failed to spawn `as`.");

@@ -130,6 +130,9 @@ fn main() {
         if std::arch::is_aarch64_feature_detected!("jsconv") {
             test_fjcvtzs();
         }
+        if std::arch::is_aarch64_feature_detected!("frintts") {
+            test_frint32z();
+        }
     }
 
     Box::pin(
@@ -239,6 +242,16 @@ unsafe fn test_fjcvtzs() {
         let output: i32;
         std::arch::asm!("fjcvtzs {:w}, {:d}", out(reg) output, in(vreg) 3.5f64);
         assert_eq!(output, 3);
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", not(jit)))]
+#[target_feature(enable = "frintts")]
+unsafe fn test_frint32z() {
+    unsafe {
+        let output: f64;
+        std::arch::asm!("frint32z {:d}, {:d}", out(vreg) output, in(vreg) 1.5f64);
+        assert_eq!(output, 1.0);
     }
 }
 

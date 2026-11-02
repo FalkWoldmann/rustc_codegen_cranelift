@@ -615,14 +615,6 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
             generated_asm.push_str(".att_syntax\n");
         }
 
-        if self.arch == InlineAsmArch::AArch64 {
-            for feature in &self.tcx.codegen_fn_attrs(self.enclosing_def_id).target_features {
-                if let Some(extension) = aarch64_arch_extension(feature.name.as_str()) {
-                    writeln!(generated_asm, ".arch_extension {extension}").unwrap();
-                }
-            }
-        }
-
         // The actual inline asm
         for piece in self.template {
             match piece {
@@ -680,14 +672,6 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
             }
         }
         generated_asm.push('\n');
-
-        if self.arch == InlineAsmArch::AArch64 {
-            for feature in &self.tcx.codegen_fn_attrs(self.enclosing_def_id).target_features {
-                if let Some(extension) = aarch64_arch_extension(feature.name.as_str()) {
-                    writeln!(generated_asm, ".arch_extension no{extension}").unwrap();
-                }
-            }
-        }
 
         if is_x86 && self.options.contains(InlineAsmOptions::ATT_SYNTAX) {
             generated_asm.push_str(".intel_syntax noprefix\n");
@@ -967,21 +951,5 @@ fn asm_clif_type<'tcx>(fx: &FunctionCx<'_, '_, 'tcx>, ty: Ty<'tcx>) -> Option<ty
             fx.clif_type(ty)
         }
         _ => fx.clif_type(ty),
-    }
-}
-
-fn aarch64_arch_extension(target_feature: &str) -> Option<&str> {
-    match target_feature {
-        "dpb" => Some("ccpp"),
-        "dpb2" => Some("ccdp"),
-        "fhm" => Some("fp16fml"),
-        "jsconv" => Some("jscvt"),
-        "paca" | "pacg" => Some("pauth"),
-        "rand" => Some("rng"),
-        "spe" => Some("profile"),
-        "ecv" | "flagm2" | "frintts" | "lse2" | "neon" | "outline-atomics" | "pmuv3" | "rcpc2"
-        | "vh" => None,
-        version if version.starts_with("v8.") || version.starts_with("v9") => None,
-        _ => Some(target_feature),
     }
 }

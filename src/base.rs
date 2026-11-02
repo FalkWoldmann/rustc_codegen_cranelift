@@ -29,7 +29,7 @@ pub(crate) struct CodegenedFunction {
     func: Function,
     clif_comments: CommentWriter,
     func_debug_cx: Option<FunctionDebugContext>,
-    inline_asm: String,
+    pub(crate) inline_asm: String,
 }
 
 pub(crate) fn codegen_fn<'tcx>(

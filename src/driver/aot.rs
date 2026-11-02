@@ -1,6 +1,7 @@
 //! The AOT driver uses [`cranelift_object`] to write object files suitable for linking into a
 //! standalone executable.
 
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::fs::File;
 use std::io::BufWriter;
@@ -25,6 +26,7 @@ use rustc_middle::mono::{MonoItem, MonoItemData, Visibility};
 use rustc_session::config::{OptLevel, OutputFilenames, OutputType};
 use rustc_session::{BorrowedIncrCompSession, Session};
 use rustc_span::Symbol;
+use rustc_target::asm::InlineAsmArch;
 
 use crate::base::CodegenedFunction;
 use crate::debuginfo::TypeDebugContext;
@@ -39,6 +41,7 @@ pub(crate) struct AotModule {
     debug_context: Option<DebugContext>,
     codegened_functions: Vec<CodegenedFunction>,
     global_asm: String,
+    asm_target_features: BTreeSet<String>,
 }
 
 fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
@@ -81,6 +84,7 @@ fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
         debug_context,
         codegened_functions,
         global_asm,
+        asm_target_features: BTreeSet::new(),
     }
 }
 
@@ -185,6 +189,14 @@ fn codegen_cgu(tcx: TyCtxt<'_>, cgu_name: Symbol) -> AotModule {
                     &mut module.module,
                     instance,
                 );
+                if tcx.sess.asm_arch == Some(InlineAsmArch::AArch64)
+                    && !codegened_function.inline_asm.is_empty()
+                {
+                    let attrs = tcx.codegen_fn_attrs(instance.def_id());
+                    module
+                        .asm_target_features
+                        .extend(attrs.target_features.iter().map(|f| f.name.to_string()));
+                }
                 module.codegened_functions.push(codegened_function);
             }
             MonoItem::Static(def_id) => {
@@ -246,6 +258,7 @@ fn compile_cgu(
             crate::global_asm::compile_global_asm(
                 &aot_module.global_asm_config,
                 aot_module.global_asm,
+                &aot_module.asm_target_features,
                 &global_asm_object_file,
             )?;
 
